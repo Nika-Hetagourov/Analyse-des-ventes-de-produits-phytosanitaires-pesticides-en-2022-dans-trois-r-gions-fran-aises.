@@ -1,0 +1,529 @@
+
+
+# Analyse des ventes de produits phytopharmaceutiques en 2022 (Normandie, Guadeloupe, Auvergne-Rhône-Alpes)
+
+## Introduction
+
+Les produits phytopharmaceutiques (pesticides) sont largement utilisés en agriculture, mais les quantités employées peuvent varier fortement selon les régions et les types de cultures 
+La Normandie, région agricole tempérée (grandes cultures, herbages), et la Guadeloupe, région tropicale (bananeraies, canne à sucre, etc) offrent un contraste intéressant en 2022 
+Nous disposons également des données pour l’Auvergne-Rhône-Alpes (ARA) une grande région continentale à agriculture intensive 
+
+###PBQ : Quels sont les déterminants des quantités de substances phytosanitaires achetées en 2022 et comment diffèrent-ils entre une région continentale comme la Normandie, une région tropicale comme la Guadeloupe, et une grande région agricole comme l’Auvergne-Rhône-Alpes ?
+
+#Objectif de notre projet : 
+En 1er décrire ces achats de pesticides (volumes, types de substances, répartition par dangerosité) dans les différente régions, puis proposer des modèles économétriques expliquant la quantité achetée de substances actives en fonction de facteurs économiques et contextuels (région, catégorie de danger de la substance, etc.) 
+Nous verrons ausi l’influence possible de facteurs non observés (climat, types de cultures, réglementation locale…) pour interpréter les écarts constatés
+
+## Description des données
+
+Les données proviennent de la Base Nationale des Ventes de produits phytopharmaceutiques (BNDV) pour l’année 2022. 
+Nous disposons de trois base de données CSV filtrés chacun sur une région : 
+la Normandie (métropole), la Guadeloupe (DOM) et l’ARA (métropole) 
+Chaque enregistrement correspond à l’achat annuel cumulé d’un produit ou d’une substance active par un ou pls acheteurs localisés dans un même code postal
+
+Normandie & Guadeloupe contiennent des données agrégées par substance active (lorsqu’un produit contient plusieurs substances, chaque substance est reportée séparément avec la quantité correspondante)
+Cepdnant la base d’ARA liste les ventes par produit commercial et indique la quantité de produit vendu, sans détailler les substances qu’il contient 
+On va donc faire une fusion de celle ci avec les données substances pour récupérer les informations manquantes
+
+#Nature base de donnée : 
+Coupe transversale sur une année unique (cf 2022), avec une dimension géographique (par code postal au sein de chaque région)
+
+
+
+**Variables :** Les trois jeux de données partagent (directement ou après fusion) les mêmes variables clés :
+- **annee** : l’année de vente (2022 pour toutes les observations ici).
+- **code_postal_acheteur** : le code postal de l’acheteur (localisation de l’achat, agrégé).
+- **amm** : le code d’Autorisation de Mise sur le Marché du produit vendu (identifiant unique d’un produit phytopharmaceutique).
+- **substance** : le nom de la substance active contenue dans le produit.
+- **cas** : le numéro CAS (identifiant chimique international) de la substance.
+- **quantite_substance** : la quantité de substance active achetée, exprimée en **kilogrammes de matière active**.
+- **classification** : la catégorie de danger réglementaire de la substance. Par exemple :
+  - *CMR* : Cancérogène, Mutagène ou Reprotoxique (substance présentant des risques graves pour la santé à long terme),
+  - *Santé A* : Toxicité aiguë pour la santé humaine (danger immédiat en cas d’exposition),
+  - *Env A* : Dangerosité élevée pour l’environnement (très toxique pour organismes non-cibles),
+  - *Env B* : Dangerosité modérée pour l’environnement,
+  - *Autre* : substances ne rentrant pas dans les catégories précédentes (danger moindre ou non classées dans ces catégories).
+- **classification_mention** : une mention réglementaire additionnelle éventuelle (champ souvent vide). Par exemple “Substitution” indique une substance **candidate à la substitution** (jugée préoccupante et susceptible d’être remplacée), “Exclusion” indique qu’elle répond à des **critères d’exclusion** (dangerosité très forte justifiant un retrait à terme). Si aucune mention particulière ne s’applique, la valeur est manquante.
+- **achat_etranger** : indique si l’achat a été effectué à l’étranger (“Oui”/“Non”). Dans nos données 2022 régionales ce champ vaut “Non” dans la quasi-totalité des cas.
+
+
+#Dimension base :
+Normandie très volumineuse (environ 113 070 obs), reflétant l’importance de l’usage des pesticides dans cette grande région agricole 
+Guadeloupe ne compte que 50 enregistrements, le marché y étant beaucoup plus restreint L’ARA a également une base volumineuse (environ 78 500 enregistrements produits) 
+NOTE !!!présence de qlq valeurs manquantes (cf NA) ou non communiquées : 
+par exemple 639 lignes en Normandie (et 1 en Guadeloupe) ont une `quantite_substance` indiquée comme “nc” (non communiquée), que nous traiterons comme des NAZ 
+Idem une quinzaine de lignes en Normandie ont `classification = "nc"` non classé 
+Minoritaires, ces cas seront écartés dans les analyses quantitatives 
+A noter aussi le fichier ARA ne fournit pas directement les substances ni leurs classifications pour chaque vente de produit : on va devoir enrichir ces données en associant chaque produit (`amm`) aux substances actives correspondantes issues de la base Normandie/Guadeloupe
+
+## Statistiques descriptives
+
+Stat des des données de Normandie & Guadeloupe, afin de mettre en évidence les caract principales (distribution des quantités vendues, diversité des substances, répartition par classe de danger, etc.) et les différences entre ces deux régions.  
+
+### Chargement et aperçu des données
+
+```{r}
+# Chargement des packages nécessaires
+library(dplyr)
+library(knitr)
+# (Installer lmtest si nécessaire pour les tests plus loin : install.packages("lmtest"))
+library(lmtest)
+
+# Importation des données CSV pour Normandie et Guadeloupe
+norm <- read.csv("BNVD_TRACABILITE_20231023_ACHAT_CP_SUBSTANCE_NORMANDIE_2022.csv", sep=";", na.strings="nc")
+guad <- read.csv("BNVD_TRACABILITE_20231023_ACHAT_CP_SUBSTANCE_GUADELOUPE_2022.csv", sep=";", na.strings="nc")
+
+# Ajout d'une colonne Région pour distinguer les provenances
+norm$Region <- "Normandie"
+guad$Region <- "Guadeloupe"
+
+# Aperçu des données importées
+dim(norm); dim(guad)      # dimensions des jeux de données
+head(norm, 5)             # premières lignes Normandie
+head(guad, 5)             # premières lignes Guadeloupe
+
+# Conversion des colonnes catégorielles en facteur pour analyses ultérieures
+norm$classification <- as.factor(norm$classification)
+norm$classification_mention <- as.factor(norm$classification_mention)
+norm$achat_etranger <- as.factor(norm$achat_etranger)
+guad$classification <- as.factor(guad$classification)
+guad$classification_mention <- as.factor(guad$classification_mention)
+guad$achat_etranger <- as.factor(guad$achat_etranger)
+
+# Combinaison des deux jeux de données en un seul (pour certaines analyses globales)
+data <- rbind(norm, guad)
+data$classification <- as.factor(data$classification)
+data$classification_mention <- as.factor(data$classification_mention)
+data$achat_etranger <- as.factor(data$achat_etranger)
+```
+
+#COMMENTAIRE 
+En 2022, la Normandie totalise un très grand volume de substances actives vendues, tandis que la Guadeloupe en rpz une quantité bien plus modeste 
+D’après la base, environ 4,87 millions de kg de substances actives ont été vendu en Normandie sur l’année 2022, contre 846 kg en Guadeloupe 
+CAd que la Normandie rpz plus de 5000 fois la masse de pesticides vendus en Guadeloupe 
+Cette différence s’explique par la taille des marchés agricoles : 
+la Normandie est une vaste région métropolitaine à agriculture intensive alors que la Guadeloupe est un territoire insulaire de taille limitée avec des cultures spécialisées
+
+La Normandie se caract également par une grande diversité de substances utilisées : 
+323 substances actives distinctes vendues en 2022 en Normandie, contre 40 substances distinctes en Guadeloupe 
+ça reflète la variété des cultures et des traitements phytosanitaires en Normandie (grandes cultures céréalières, colza, lin, cultures légumières, etc) tandis qu’en Guadeloupe les cultures principales (banane, canne, melon…) mobilisent un éventail plus restreint de pesticides
+
+### Distribution des quantités vendues
+
+On observe une forte hétérogénéité dans les quantités achetées par code postal, particulièrement en Normandie 
+La distribut° des quantités par enregistrement est très asymétrique, avec beaucoup de petites quantités et quelques très grandes quantités 
+
+Résumé statistique qui illustre la dispersion :
+
+```{r}
+# Statistiques de base sur la variable quantite_substance pour chaque région
+summary(norm$quantite_substance)    # Normandie
+summary(guad$quantite_substance)    # Guadeloupe
+```
+
+#Interprétation:
+En Normandie, la médiane des quantités achetées par substance et par code postal n’est que de quelques kilogrammes (4 kg), alors que la moyenne (43 kg) est bien plus élevée en raison de valeurs extrêmes très importantes (jusqu’à plus de 37 tonnes pour certains enregistrements) 
+En Guadeloupe, la médiane est d’environ (2,25 kg) et la moyenne (17 kg), ce qui reste inférieur à la Normandie 
+La plus grande valeur observée en Guadeloupe est de 522 kg, bien moindre que les sommets normands Ces stat indiquent qu’en Normandie il existe des points de vente enregistrant des quantités exceptionnellement élevées (par exemple des coopératives approvisionnant de larges exploitations), ce qui accroît la moyenne, tandis qu’en Guadeloupe même les plus gros volumes restent limités
+
+Le caractère très asymétrique apparaît clairement sur les histogrammes ci-dessous, qui présentent la distribution empirique des quantités par enregistrement pour chaque région (échelle linéaire) :
+
+```{r}
+# Histogrammes des quantités vendues par enregistrement (échelle linéaire)
+hist(norm$quantite_substance, breaks=100, col="skyblue", 
+     main="Distribution des quantités par enregistrement - Normandie 2022", 
+     xlab="Quantité de substance (kg)", ylab="Fréquence")
+hist(guad$quantite_substance, breaks=20, col="orange",
+     main="Distribution des quantités par enregistrement - Guadeloupe 2022",
+     xlab="Quantité de substance (kg)", ylab="Fréquence")
+```
+
+###COMMENTAIRE 
+On observe que pour la Normandie (histogramme de gauche), la plupart des enregistrements correspondent à de petites quantités (la première barre, très élevée, représente les nombreux achats inférieurs à 1 kg), et la distribution possède une longue traîne vers la droite (des fréquences faibles mais non nulles jusqu’à des centaines ou milliers de kg) 
+En Guadeloupe (histogramme de droite), la distribution est également asymétrique mais avec un volume global beaucoup plus faible : la plupart des achats sont de l’ordre de quelques kg au maximum, et seuls un ou deux points de vente atteignent quelques centaines de kg 
+
+
+
+
+
+Pour mieux visualiser les écarts extrêmes, on peut utiliser une échelle ln 
+Le graphique  montre, pour la Normandie, la distribution des quantités (exprimé en log10(kg)) selon la catégorie de danger de la substance 
+Chaque boxplot rpz la distribution des log-quantités pour les enregistrements d’une classe donnée :
+
+```{r}
+# Boxplot des quantités (échelle log10) par catégorie de danger en Normandie
+boxplot(log10(norm$quantite_substance) ~ norm$classification,
+        main="Quantité achetée (log10) par classe de substance - Normandie 2022",
+        xlab="Classification de danger de la substance", ylab="Log10(Quantité achetée en kg)",
+        col="lightblue", outline=TRUE)
+```
+
+### Interprétation: 
+En dimension log, les distributions par catégorie apparaisse plus symétriques 
+On observe que la médiane diffère selon les classes de danger : par exemple, les substances classées CMR tendent à avoir des quantités plus élevées (médiane plus haute) que les substances classées Autre 
+Les substances Santé A ont une médiane proche de celle des Autre 
+Les catégories Env A & Env B semblent intermédiaires 
+Neanmoins, il y a un recouvrement important des distributions (les box sont larges), ce qui veut dire qu'il y a une variabilité interne forte : au sein de chaque classe, certains achat sont faibles et d’autres très élevé 
+Cela suggère que la classification de danger à elle seule n’explique qu’une part modérée des quantités utilisée (cf à voir avec analyse econometrique) 
+
+### Substances les plus vendues
+
+Id de quelles substances actives domine en volume dans chaque région :
+
+```{r}
+# Top 5 substances par quantité totale vendue (Normandie et Guadeloupe)
+top5_norm <- norm %>% group_by(substance) %>% 
+  summarise(total_kg = sum(quantite_substance, na.rm=TRUE)) %>% 
+  arrange(desc(total_kg)) %>% head(5)
+top5_guad <- guad %>% group_by(substance) %>% 
+  summarise(total_kg = sum(quantite_substance, na.rm=TRUE)) %>% 
+  arrange(desc(total_kg)) %>% head(5)
+top5_norm %>% kable(digits=1, caption="Top 5 des substances (Normandie 2022)")
+top5_guad %>% kable(digits=1, caption="Top 5 des substances (Guadeloupe 2022)")
+```
+
+###COMMENTAIRE
+Les résultats montrent qu’en Normandie les volumes sont largement dominés par quelques substances très utilisées : par exemple, l’huile de vaseline rpz à elle seule plus de 830 000 kg de matière active, suivie du prosulfocarbe (687 000 kg, un herbicide utilisé en céréales), ect ect
+Ces 5 substances totalisent plus de 2,4 millions de kg, soit près de la moitié du volume normand à elles seules 
+Cela indique une concentration de l’usage sur certains herbicides clés des grandes cultures 
+
+En Guadeloupe, les volumes par substance sont beaucoup plus faibles 
+La substance la plus vendue est le cuivre (sous forme de sulfate de cuivre) avec 522 kg suivit par le cyprodinil ect ect  
+On voit qu’aucune substance guadeloupéenne n’atteint ne serait ce que 1 tonne de matière active, ce qui souligne l’écart de taille de marché avec la Normandie 
+Le cuivre est une substance de la catégorie "Autre" (ou Santé A) souvent utilisée en agriculture biologique, tandis que les autres sont des fongicides de synthèse à usage modéré.
+
+### Répartition par classe de danger
+
+Examinons la proportion des ventes selon les catégories de danger des substances dans chaque région :
+
+```{r}
+# Répartition (effectifs et proportions) par classe de danger pour chaque région
+table_norm_class <- table(norm$classification)
+prop_norm_class <- prop.table(table_norm_class)
+table_guad_class <- table(guad$classification)
+prop_guad_class <- prop.table(table_guad_class)
+table_norm_class; prop_norm_class
+table_guad_class; prop_guad_class
+
+# Barplots comparatifs de la répartition des classes de danger par région
+classes_order <- c("Autre","CMR","Env A","Env B","Santé A")  # ordre souhaité pour cohérence
+colors <- c("grey","red","forestgreen","lightgreen","orange")
+barplot(table_norm_class[classes_order], col=colors, 
+        main="Normandie 2022 - Répartition des ventes par classification",
+        xlab="Classification de danger", ylab="Nombre d'enregistrements")
+barplot(table_guad_class[classes_order], col=colors,
+        main="Guadeloupe 2022 - Répartition des ventes par classification",
+        xlab="Classification de danger", ylab="Nombre d'enregistrements")
+```
+
+Interprétation: En nombre d’enregistrements, la catégorie dominante est Env A dans les deux régions : elle rpz 52% des ventes en Normandie et 59% en Guadeloupe 
+Ca signifie que plus de la moitié des transactions portent sur des substances classées très toxiques pour l’environnement (par ex. herbicides ou fongicides impactant la faune et la flore) 
+
+Mais la Normandie se distingue par une part notable de substances CMR (18% des enregistrements) alors qu’en Guadeloupe cette catégorie est plus rare (8%)
+Les substances CMR (cancérogènes, mutagènes, reprotoxiques) utilisées en Normandie pourraient inclure certains herbicides (ex: prosulfocarbe) ou fongicides interdits en UE tropicale, expliquant leur moindre présence en Guadeloupe 
+La catégorie Autre (substances sans classe de danger spécifique) représente environ 11% des ventes en Normandie et 16% en Guadeloupe 
+Les substances Santé A (toxicité aiguë) comptent pour 9% en Normandie et 14% en Guadeloupe, légèrement plus fréquent en Guadeloupe (peut-être à cause de l’usage important de cuivre ????classé Santé A mention Substitut°) 
+La catégorie Env B (danger env. modéré) est minoritaire dans les deux cas (10% Normandie, 2% Guadeloupe) 
+
+#résumé 
+Normandie et Guadeloupe ont un profil de danger global assez similaire (dominance de Env A, part non négligeable de CMR et Autre en Normandie) mais la Normandie utilise relativement plus de substances très dangereuses pour la santé (CMR) que la Guadeloupe, où l’on recourt un peu plus aux substances à toxicité aiguë (surement liée aux traitements post-récolte ou aux produits cupriques)
+
+### Statistiques des par groupe
+
+Tableau stat des par région puis par classe de substance (en combinant Normandie et Guadeloupe) :
+
+```{r}
+# Table 1: Statistiques par région (Normandie vs Guadeloupe)
+stats_region <- data %>% filter(!is.na(quantite_substance)) %>%
+  group_by(Region) %>%
+  summarise(
+    N = n(),
+    Moyenne = mean(quantite_substance, na.rm=TRUE),
+    Médiane = median(quantite_substance, na.rm=TRUE),
+    Ecart_type = sd(quantite_substance, na.rm=TRUE)
+  )
+kable(stats_region, digits=2, caption="Quantité de substance par enregistrement, par région (2022)")
+
+# Table 2: Statistiques par classification (données Normandie+Guadeloupe)
+stats_class <- data %>% filter(!is.na(quantite_substance), !is.na(classification)) %>%
+  group_by(classification) %>%
+  summarise(
+    N = n(),
+    Moyenne = mean(quantite_substance, na.rm=TRUE),
+    Médiane = median(quantite_substance, na.rm=TRUE),
+    Ecart_type = sd(quantite_substance, na.rm=TRUE)
+  )
+kable(stats_class, digits=2, caption="Quantité de substance par enregistrement, par classe de danger")
+```
+
+
+## Fusion et transformations (ajout de ARA)
+
+Pour exploiter la base d’ARA dans le projet on va la fusionner avec les données de Normandie/Guadeloupe 
+
+
+1. Créer une table de correspondance à partir des données Normandie+Guadeloupe, listant pour chaque code `amm` les substances actives associées et leur part relative dans le produit.
+2. Joindre cette table avec les données Auvergne-Rhône-Alpes pour attribuer à chaque enregistrement produit les substances et classifications.
+3. Calculer la quantité de chaque substance dans l’achat, en répartissant la quantité de produit proportionnellement entre les substances (selon leur fraction dans le produit).
+4. Ajouter une étiquette de région "Auvergne-Rhône-Alpes" et combiner avec les autres données.
+
+```{r}
+# Importation des données Auvergne-Rhône-Alpes (ventes par produit)
+rhone <- read.csv("BNVD_TRACABILITE_20231023_ACHAT_CP_PRODUIT_AUVERGNE RHONE ALPES_2022.csv", sep=";", na.strings="nc")
+rhone$Region <- "Auvergne-Rhône-Alpes"
+
+# Construction de la table de composition des produits à partir de Normandie+Guadeloupe
+comp <- norm %>% 
+  group_by(amm, substance, classification, classification_mention) %>% 
+  summarise(total_active = sum(quantite_substance, na.rm=TRUE)) %>% 
+  ungroup() %>% 
+  group_by(amm) %>% 
+  mutate(total_active_all = sum(total_active)) %>% 
+  mutate(fraction = total_active / total_active_all) %>% 
+  ungroup()
+
+# Jointure de la table Rhone avec la composition pour obtenir les substances et classifications
+rhone_substance <- merge(rhone, comp, by="amm")
+# Calcul de la quantité de substance active estimée pour chaque ligne (quantite_produit * fraction)
+rhone_substance$quantite_substance <- rhone_substance$quantite_produit * rhone_substance$fraction
+
+# Aperçu des données après fusion
+dim(rhone); dim(rhone_substance)
+head(rhone_substance, 5)
+```
+
+ 
+
+Remarque sur les hypothèses : on part du principe que la proport° de chaque substance dans un produit est constante et on utilise les données Normandie/Guadeloupe pour l’estimer
+La composition d’un produit phytosanitaire est fixe par homologation mais comme la base ARA exprime les quantités de produit en kg ou en litres vendus, on simplifie (1 litre de produit=1 kg de matière (ce qui peut introduire des erreur si la densité change) 
+Cette simplification nous permet de convertir les volumes en équivalent poids de substance active Moins de 5% des enregistrements Rhône-Alpes n’ont pas pu être appariés (produits sans équivalent dans Normandie/Guadeloupe) ils sont exclus de l’analyse puisque leur `classification` serait manquante.
+
+Table consolidée par substance active pour les trois bases Normandie Guadeloupe ARA 
+On combine les données pour l’analyse économétrique:
+
+```{r}
+# Combinaison de toutes les régions en une base commune par substance
+# (en alignant les colonnes avec celles de data)
+cols <- c("annee","code_postal_acheteur","amm","substance","cas",
+          "quantite_substance","classification","classification_mention",
+          "achat_etranger","Region")
+data_all <- rbind(
+  data[, cols],
+  rhone_substance[, cols]
+)
+# Nettoyage : exclusion des valeurs manquantes sur quantite_substance et classification
+data_all <- subset(data_all, !is.na(quantite_substance) & classification != "nc")
+dim(data_all)
+```
+
+
+```{r}
+# Colonnes attendues
+cols <- c("annee","code_postal_acheteur","amm","substance","cas",
+          "quantite_substance","classification","classification_mention",
+          "achat_etranger","Region")
+
+# Ajouter les colonnes manquantes à rhone_substance
+missing_cols <- setdiff(cols, colnames(rhone_substance))
+for (col in missing_cols) {
+  rhone_substance[[col]] <- NA
+}
+
+# Réorganiser l’ordre des colonnes
+rhone_substance <- rhone_substance[, cols]
+
+# Même chose éventuellement pour data (selon la suite du code)
+data <- data[, cols]
+
+# Maintenant fusionner
+data_all <- rbind(data, rhone_substance)
+
+# Nettoyage
+data_all <- subset(data_all, !is.na(quantite_substance) & classification != "nc")
+dim(data_all)
+
+```
+
+
+```{r}
+print(colnames(rhone_substance))
+cols <- c("annee","code_postal_acheteur","amm","substance","cas",
+          "quantite_substance","classification","classification_mention",
+          "achat_etranger","Region")
+
+```
+```{r}
+# Combinaison de toutes les régions en une base commune par substance
+# (en alignant les colonnes avec celles de data)
+cols <- c("annee","code_postal_acheteur","amm","substance","cas",
+          "quantite_substance","classification","classification_mention",
+          "achat_etranger","Region")
+data_all <- rbind(
+  data[, cols],
+  rhone_substance[, cols]
+)
+# Nettoyage : exclusion des valeurs manquantes sur quantite_substance et classification
+data_all <- subset(data_all, !is.na(quantite_substance) & classification != "nc")
+dim(data_all)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+La base finale data_all contient les observations Normandie, Guadeloupe et ARA, chaque ligne correspond à une substance active achetée dans un code postal, avec sa quantité et sa classification. 
+On peut mtnt estimer un modèle sur l’ensemble des régions pour tester la robustesse des résultats 
+Notons que la région ARA apporte un volume de données très important (elle compte en réalité plus d’achats que la Normandie), ce qui va influencer les résultats globaux.
+
+## Modèles économétriques
+
+### Modèle 1 : Influence de la région
+
+Spécification : On commence par un modèle qui examine l’effet de la région sur la quantité achetée 
+Ceteris paribus (ici on ne contrôle rien d’autre), si la moyenne des quantités diffère significativement entre la Normandie et la Guadeloup
+On exclut ARA dans ce 1er modèle pour se concentrer sur le contraste “région tempérée vs région tropicale”
+
+on estime 
+$$\ln(\text{quantite\_substance}_{i}) = \beta_0 + \beta_1 \cdot \mathbf{1}\{\text{Guadeloupe}_i\} + \varepsilon_i,$$ 
+où $\mathbf{1}\{\text{Guadeloupe}_i\}$ est une variable indicatrice/binaire valant 1 si l’observation $i$ appartient à la Guadeloupe (et 0 si Normandie) 
+Le coefficient $\beta_1$ capte donc l’écart de $\ln(\text{quantité})$ entre la Guadeloupe et la Normandie 
+
+Nous nous attendons a priori à $\beta_1$ négatif (car on a vu que les quantités sont en moyenne plus faibles en Guadeloupe). 
+
+Estimation : On restreint `data_all` aux deux régions concernées et on effectue une rég linéaire On fixe la Normandie comme catégorie de référence pour la variable `Region` afin que le coefficient estimé correspond à l’effet (Guadeloupe – Normandie)
+
+```{r}
+# Sous-ensemble Normandie + Guadeloupe
+data_NG <- subset(data_all, Region %in% c("Normandie","Guadeloupe"))
+data_NG$Region <- relevel(factor(data_NG$Region), ref="Normandie")
+# Régression linéaire simple: log(quantité) ~ région
+model1 <- lm(log(quantite_substance) ~ Region, data=data_NG)
+summary(model1)
+```
+
+Résultats : Le coefficient estimé pour `RegionGuadeloupe` est négatif et significatif 
+D’après le résumé, $\hat{\beta}_1 \approx -0.90$ (erreur standard 0,33) et le test de Studen associé indique $p < 0,01$ 
+Ca signifie que, en moyenne, être en Guadeloupe réduit la quantité achetée d’environ 0,90 en log (soit une quantité environ $e^{-0,90} \approx 0,41$ fois celle de Normandie, ceteris paribus) 
+Cad que pour un achat comparable, la Guadeloupe utilise en moyenne près de 60% de quantité en moins que la Normandie 
+Cet effet de région est conforme à ce qu’on observait dans les statistiques des 
+
+Le test de Fisher global du modèle (F = 7,29, p = 0,007) confirme que la variable région apporte une information significative 
+Cependant, le R2 est extrêmement faible (cf WARNING car R2 faible !!) (de l’ordre de $6 \times 10^{-5}$, quasi nul) 
+En effet, la région n’explique quasiment rien de la variabilité totale des quantités, ce qui n’est pas surprenant étant donné l’énorme dispersion intra-régionnal
+Cela indique qu’il y a bcp d’autres facteur (taille des exploitations, type de culture, nature de la substance, etc.) expliquant les quantités, au-delà de la simple localisation géographique
+
+Le modèle 1 met donc en évidence une différence significative entre Normandie et Guadeloupe en 2022, mais cette différence reste modeste par rapport aux variations individuelles
+
+### Modèle 2 : Effet de la classification de la substance (avec contrôle de la région)
+
+Spécification : ce modèle intègre un facteur explicatif supplémentaire : la classification de danger de la substance
+On cherche à évaluer si, ceteris paribus, certaines catégories de substances sont utilisées en quantités systématiquement plus élevées que d’autres 
+On conserve également la variable région (Normandie vs Guadeloupe) pour contrôler les différences régionales tout en isolant l’effet propre des classes de substances
+
+Le modèle peut s’écrire :
+$$\ln(\text{quantite})_{i} = \beta_0 + \beta_1 \mathbf{1}\{\text{Guadeloupe}_i\} + \beta_2 \mathbf{1}\{\text{CMR}_i\} + \beta_3 \mathbf{1}\{\text{EnvA}_i\} + \beta_4 \mathbf{1}\{\text{EnvB}_i\} + \beta_5 \mathbf{1}\{\text{SantéA}_i\} + \varepsilon_i,$$
+où la catégorie de référence pour la substance est Autre
+
+Ici, $\beta_2...\beta_5$ mesurent l’écart de log-quantité entre une substance de la classe considérée et une substance Autre, ceteris paribus (y compris région)
+$\beta_1$ mesure toujours l’écart Guadeloupe–Normandie, mais cette fois à danger équivalent (cad en comparant des substances de même catégorie dans les deux régions)
+
+
+```{r}
+# On utilise le même data_NG (Normandie/Guadeloupe) et on s'assure de la référence pour classification
+data_NG$classification <- relevel(factor(data_NG$classification), ref="Autre")
+# Régression linéaire multiple: log(quantité) ~ région + classification
+model2 <- lm(log(quantite_substance) ~ Region + classification, data=data_NG)
+summary(model2)
+``
+```
+
+
+Résultats principaux :
+
+Le coefficient de Region Guadeloupe est toujours négatif et significatif 
+Concernant la classification des substances : 
+Les substances CMR ont un coefficient positif très marqué, $\hat{\beta}_\text{CMR} \approx +0,79$ (significatif au-delà de $p<0,001$) 
+Ca signifie que, à région donnée, une substance classée CMR est associée à une quantité environ $e^{0,79} \approx 2,2$ fois plus élevée qu’une substance de catégorie Autre 
+C’est un effet important : les substances CMR (par ex. certains herbicides puissants) sont utilisées en volumes nettement supérieurs aux substances n’ayant pas de classe de danger
+  - Les substances Env A (très toxiques pour l’environnement) ont également un coefficient positif significatif quoique plus faible, 
+  $\hat{\beta}_\text{EnvA} \approx +0,15$ ($p<0,001$)
+  
+  Cela indique une légère tendance à des quantités plus élevées que Autre (environ +16% en quantité, puisque $e^{0,15}\approx1,16$) 
+  L’effet est présent mais modeste
+  - Les Env B affichent $\hat{\beta}_\text{EnvB} \approx +0,51$ (très significatif), soit un facteur $e^{0,51}\approx1,67$ sur la quantité par rapport à Autre 
+  Donc les substances dangereuses pour l’environnement (même modérées) tendent à être utilisées 67% de plus que les substances Autre
+  - Les substances Santé A ont un coefficient $\hat{\beta}_\text{SantéA} \approx +0,05$, qui n’est pas statistiquement différent de 0 (p 0,12, donc > 0,05) 
+  Autrement dit, à région égale, on ne détecte pas de différence significative de quantité entre une substance toxique aiguë pour la santé et une substance de référence Autre 
+  Ce résultat est intéressant car il suggère que les substances très toxiques pour l’homme ne sont pas forcément celles qu’on utilise le plus massivement (c’est plutôt les CMR et certaines environnementales qui dominent)
+
+Le R2 du modèle 2 est légèrement amélioré (0,0138, soit 1,4% de variance expliquée) 
+Cela reste faible, mais on a gagné un peu en pouvoir explicatif par rapport au modèle 1 (qui était quasi nul) 
+Le test de Fisher global indique que le modèle est significatif ($F \approx 77$, p-value $\ll 0,001$ 
+Pour vérifier l’apport de la classification, on peut comparer le modèle 2 au modèle 1 via un test d’ANOVA :
+
+```{r}
+anova(model1, model2)
+```
+
+
+
+
+
+
+
+
